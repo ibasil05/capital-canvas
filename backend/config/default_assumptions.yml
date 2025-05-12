@@ -1,0 +1,5 @@
+tax_rate: 0.25
+terminal_growth: 0.025
+risk_free_rate: 0.045
+market_premium: 0.055
+beta_override: null 

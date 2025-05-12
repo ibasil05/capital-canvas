@@ -1,0 +1,67 @@
+# Credit Rating Grid
+# This file defines the thresholds for different credit ratings
+# based on leverage (Debt/EBITDA) and coverage (EBITDA/Interest) ratios
+
+# Rating categories and their associated cost of debt spreads (above risk-free rate)
+rating_categories:
+  AAA:
+    spread: 0.0050  # 50 bps
+    description: "Extremely strong capacity to meet financial commitments"
+  AA:
+    spread: 0.0075  # 75 bps
+    description: "Very strong capacity to meet financial commitments"
+  A:
+    spread: 0.0100  # 100 bps
+    description: "Strong capacity to meet financial commitments"
+  BBB:
+    spread: 0.0150  # 150 bps
+    description: "Adequate capacity to meet financial commitments"
+  BB:
+    spread: 0.0300  # 300 bps
+    description: "Less vulnerable in the near-term but faces major ongoing uncertainties"
+  B: 
+    spread: 0.0450  # 450 bps
+    description: "More vulnerable to adverse business, financial and economic conditions"
+  CCC:
+    spread: 0.0650  # 650 bps
+    description: "Currently vulnerable and dependent on favorable conditions to meet commitments"
+  CC:
+    spread: 0.0850  # 850 bps
+    description: "Highly vulnerable; default has not yet occurred, but is expected"
+  C:
+    spread: 0.1050  # 1050 bps
+    description: "Highly vulnerable, with little prospect for recovery"
+  D:
+    spread: 0.1500  # 1500 bps
+    description: "In default"
+
+# Leverage ratio thresholds (Debt/EBITDA)
+leverage_thresholds:
+  AAA: 1.0
+  AA: 1.5
+  A: 2.0
+  BBB: 3.0
+  BB: 4.5
+  B: 6.0
+  CCC: 7.5
+  CC: 9.0
+  C: 10.0
+  D: 15.0
+
+# Coverage ratio thresholds (EBITDA/Interest)
+coverage_thresholds:
+  AAA: 25.0
+  AA: 20.0
+  A: 15.0
+  BBB: 8.0
+  BB: 4.0
+  B: 2.0
+  CCC: 1.5
+  CC: 1.0
+  C: 0.75
+  D: 0.25
+
+# Combination rules for final rating
+# When leverage and coverage indicators show different ratings,
+# the lower of the two ratings is used, with some exceptions.
+# These rules are implemented in the model code. 

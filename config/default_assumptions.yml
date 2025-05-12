@@ -1,0 +1,68 @@
+# Default Growth Assumptions
+revenue_growth:
+  high_growth: 0.15  # 15% annually
+  moderate_growth: 0.08  # 8% annually
+  low_growth: 0.03  # 3% annually
+  terminal_growth: 0.025  # 2.5% perpetuity growth
+
+# Margin Assumptions
+margins:
+  gross_margin:
+    improvement: 0.01  # 1% annual improvement
+    deterioration: -0.005  # 0.5% annual deterioration
+    stable: 0.0  # No change
+  ebitda_margin:
+    improvement: 0.005  # 0.5% annual improvement
+    deterioration: -0.003  # 0.3% annual deterioration
+    stable: 0.0  # No change
+
+# Working Capital Assumptions
+working_capital:
+  receivables_days: 45
+  inventory_days: 60
+  payables_days: 30
+  cash_as_percent_of_revenue: 0.05  # 5% of revenue
+
+# Capital Expenditure Assumptions
+capex:
+  as_percent_of_revenue: 0.05  # 5% of revenue
+  maintenance_capex_percent: 0.6  # 60% of total capex is maintenance
+
+# Discount Rate Assumptions
+discount_rates:
+  wacc:
+    default: 0.10  # 10% weighted average cost of capital
+    high_risk: 0.12  # 12% for higher risk scenarios
+    low_risk: 0.08  # 8% for lower risk scenarios
+  cost_of_debt:
+    investment_grade: 0.05  # 5% for investment grade
+    non_investment_grade: 0.07  # 7% for non-investment grade
+    high_yield: 0.09  # 9% for high yield
+  risk_free_rate: 0.035  # 3.5% risk-free rate
+  market_risk_premium: 0.06  # 6% market risk premium
+  tax_rate: 0.21  # 21% corporate tax rate
+
+# Trading Multiples Assumptions
+trading_multiples:
+  ev_to_ebitda:
+    median: 8.0
+    high: 12.0
+    low: 6.0
+  ev_to_revenue:
+    median: 2.0
+    high: 4.0
+    low: 1.0
+  price_to_earnings:
+    median: 15.0
+    high: 25.0
+    low: 10.0
+
+# LBO Assumptions
+lbo:
+  holding_period_years: 5
+  exit_multiple: 8.0  # EV/EBITDA at exit
+  debt_to_ebitda:
+    initial: 6.0
+    target_at_exit: 3.0
+  minimum_equity_contribution: 0.25  # 25% minimum equity
+  target_irr: 0.20  # 20% target IRR 
