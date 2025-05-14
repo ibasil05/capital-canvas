@@ -9,7 +9,7 @@ pydantic==2.6.3
 openpyxl==3.1.2
 python-pptx==0.6.23
 pyyaml==6.0.1
-httpx==0.27.0
+httpx<0.26,>=0.24
 websockets==12.0
 python-multipart==0.0.9
 pytest==8.0.2
@@ -18,4 +18,8 @@ requests==2.31.0
 aiohttp==3.9.3
 boto3==1.34.52
 jinja2==3.1.3
-email-validator==2.1.0 
+email-validator==2.1.0
+python-jose[cryptography]
+passlib[bcrypt]
+asyncpg
+sqlalchemy 

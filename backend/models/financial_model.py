@@ -8,9 +8,9 @@ import pandas as pd
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime
 
-from backend.models.valuation_engine import DCFValuation, TradingCompsValuation, LBOValuation, ValuationEngine
-from backend.models.capital_structure import CapitalStructureGrid
-from backend.config import config # Import AppConfig
+from models.valuation_engine import DCFValuation, TradingCompsValuation, LBOValuation, ValuationEngine
+from models.capital_structure import CapitalStructureGrid
+from config import config # Import AppConfig
 
 class ThreeStatementModel:
     """
@@ -187,46 +187,112 @@ class ThreeStatementModel:
     def build_model(self, assumptions: Dict[str, Any]) -> Dict[str, Any]:
         """
         Build the three-statement model based on provided assumptions.
-        
-        Args:
-            assumptions: Dictionary of model assumptions
-            
-        Returns:
-            Dictionary containing the model results, with statements as lists of records.
         """
-        # Extract assumptions
-        revenue_growth_rates = assumptions.get("revenue_growth_rates", [])
-        # terminal_growth_rate = assumptions.get("terminal_growth_rate", 0.02) # Used in DCF
-        gross_margins = assumptions.get("gross_margins", [])
-        ebitda_margins = assumptions.get("ebitda_margins", [])
+        print(f"[build_model] Top: Raw assumptions received: {assumptions}")
+
+        # Resolve assumptions for VALUATIONS first
+        discount_rate = assumptions.get("discount_rate")
+        if discount_rate is None: discount_rate = config.default_assumptions.get("discount_rate", {}).get("wacc", {}).get("base_case", 0.10)
+        print(f"[build_model] Using discount_rate for valuations: {discount_rate}")
+
+        terminal_growth_rate = assumptions.get("terminal_growth_rate")
+        if terminal_growth_rate is None: terminal_growth_rate = config.default_assumptions.get("terminal_growth_rate", {}).get("long_term_gdp_growth", 0.02)
+        print(f"[build_model] Using terminal_growth_rate for valuations: {terminal_growth_rate}")
+
+        # This tax_rate is specifically for valuation (e.g., NOPAT calc in DCF, LBO taxes)
+        valuation_tax_rate = assumptions.get("tax_rate") 
+        if valuation_tax_rate is None: valuation_tax_rate = config.default_assumptions.get("tax_rate", {}).get("effective_federal_state", 0.21)
+        print(f"[build_model] Using tax_rate for valuations: {valuation_tax_rate}")
+
+        ev_to_ebitda_multiple = assumptions.get("ev_to_ebitda_multiple")
+        if ev_to_ebitda_multiple is None: ev_to_ebitda_multiple = config.default_assumptions.get("trading_multiples", {}).get("ev_to_ebitda", {}).get("median", 8.0)
+        print(f"[build_model] Using ev_to_ebitda_multiple for valuations: {ev_to_ebitda_multiple}")
         
+        lbo_exit_multiple = assumptions.get("lbo_exit_multiple")
+        if lbo_exit_multiple is None: lbo_exit_multiple = config.default_assumptions.get("lbo", {}).get("exit_multiple", 8.0)
+        print(f"[build_model] Using lbo_exit_multiple for valuations: {lbo_exit_multiple}")
+
+        lbo_years = assumptions.get("lbo_years")
+        if lbo_years is None: lbo_years = config.default_assumptions.get("lbo", {}).get("holding_period_years", 5)
+        print(f"[build_model] Using lbo_years for valuations: {lbo_years}")
+
+        lbo_debt_to_ebitda = assumptions.get("debt_to_ebitda") # For LBO entry
+        if lbo_debt_to_ebitda is None: lbo_debt_to_ebitda = config.default_assumptions.get("lbo", {}).get("debt_to_ebitda", {}).get("initial", 3.0)
+        print(f"[build_model] Using LBO debt_to_ebitda for valuations: {lbo_debt_to_ebitda}")
+
+        # Now, resolve assumptions for PROJECTIONS (IS, BS, CF)
+        revenue_growth_rates = assumptions.get("revenue_growth_rates", []) # Already a list
+        gross_margins = assumptions.get("gross_margins", []) # Already a list
+        ebitda_margins = assumptions.get("ebitda_margins", []) # Already a list
+        
+        # This tax_rate is for projecting income statement taxes
+        projection_tax_rate = assumptions.get("tax_rate") 
+        if projection_tax_rate is None: projection_tax_rate = config.default_assumptions.get("tax_rate", {}).get("effective_federal_state", 0.21)
+        # Ensure it's a float if it comes from form as int/str for percentage
+        # However, frontend should send it as decimal (e.g., 0.21 for 21%)
+        print(f"[build_model] Using tax_rate for projections: {projection_tax_rate}")
+
+        depreciation_percent_revenue = assumptions.get("depreciation_percent_revenue")
+        if depreciation_percent_revenue is None: depreciation_percent_revenue = config.default_assumptions.get("financial_ratios", {}).get("depreciation_as_percent_of_revenue", 0.05)
+        print(f"[build_model] Using depreciation_percent_revenue for projections: {depreciation_percent_revenue}")
+
+        # Interest expense is complex; this is a simplification. Real model would use debt schedule.
+        interest_percent_operating_income = assumptions.get("interest_percent_operating_income", 0.10) 
+        if interest_percent_operating_income is None: interest_percent_operating_income = config.default_assumptions.get("financial_ratios", {}).get("interest_expense_as_percent_of_operating_income", 0.10)
+        print(f"[build_model] Using interest_percent_operating_income for projections: {interest_percent_operating_income}")
+
+        receivable_days = assumptions.get("receivable_days")
+        if receivable_days is None: receivable_days = config.default_assumptions.get("working_capital", {}).get("receivables_days", 45)
+        
+        inventory_days = assumptions.get("inventory_days")
+        if inventory_days is None: inventory_days = config.default_assumptions.get("working_capital", {}).get("inventory_days", 60)
+        
+        payable_days = assumptions.get("payable_days")
+        if payable_days is None: payable_days = config.default_assumptions.get("working_capital", {}).get("payable_days", 30)
+
+        capex_percent_revenue = assumptions.get("capex_percent_revenue") 
+        if capex_percent_revenue is None: capex_percent_revenue = config.default_assumptions.get("capex", {}).get("capex_as_percent_of_revenue", {}).get("maintainance", 0.05)
+
+        base_fixed_assets_revenue_multiple = assumptions.get("base_fixed_assets_revenue_multiple")
+        if base_fixed_assets_revenue_multiple is None: base_fixed_assets_revenue_multiple = config.default_assumptions.get("balance_sheet_ratios", {}).get("fixed_assets_to_revenue", 0.70)
+
+        # `debt_ratio` from form (e.g., 30 for 30%) is used as `target_debt_to_assets_ratio` (e.g., 0.30)
+        target_debt_to_assets_ratio = assumptions.get("debt_ratio") 
+        if target_debt_to_assets_ratio is None: 
+            target_debt_to_assets_ratio = config.default_assumptions.get("capital_structure", {}).get("target_debt_to_total_capital", 0.30)
+        else: 
+            target_debt_to_assets_ratio = target_debt_to_assets_ratio / 100.0 # Convert percentage to decimal
+        print(f"[build_model] Using target_debt_to_assets_ratio for BS projections: {target_debt_to_assets_ratio}")
+
         # Generate income statement projections
-        self._project_income_statement(revenue_growth_rates, gross_margins, ebitda_margins, assumptions) # Pass assumptions
+        self._project_income_statement(
+            revenue_growth_rates, 
+            gross_margins, 
+            ebitda_margins, 
+            projection_tax_rate, # Use the one resolved for projections
+            depreciation_percent_revenue,
+            interest_percent_operating_income
+        )
         
-        # Generate balance sheet projections
-        # receivable_days = assumptions.get("receivable_days", 45)
-        # inventory_days = assumptions.get("inventory_days", 60)
-        # payable_days = assumptions.get("payable_days", 30)
-        self._project_balance_sheet(assumptions) # Pass assumptions
+        self._project_balance_sheet(
+            receivable_days,
+            inventory_days,
+            payable_days,
+            capex_percent_revenue, 
+            base_fixed_assets_revenue_multiple,
+            target_debt_to_assets_ratio
+        )
         
-        # Generate cash flow projections
-        # capex_percent = assumptions.get("capex_percent_revenue", 0.05)
-        self._project_cash_flow(assumptions) # Pass assumptions
+        self._project_cash_flow(capex_percent_revenue, target_debt_to_assets_ratio)
         
-        # Run valuations
-        discount_rate = assumptions.get("discount_rate", config.default_assumptions.get("discount_rate", 0.10))
-        terminal_growth_rate = assumptions.get("terminal_growth_rate", config.default_assumptions.get("terminal_growth_rate", 0.02))
-        tax_rate = assumptions.get("tax_rate", config.default_assumptions.get("tax_rate", 0.21))
-        ev_to_ebitda_multiple = assumptions.get("ev_to_ebitda_multiple", config.default_assumptions.get("ev_to_ebitda_multiple", 8.0))
-        
-        # DCF valuation
+        # DCF valuation (uses valuation_tax_rate)
         self.dcf_valuation = DCFValuation(
-            self.income_statement, # Now a DataFrame with year and is_historical
-            self.cash_flow,      # Now a DataFrame
-            self.balance_sheet,  # Now a DataFrame
-            discount_rate,
-            terminal_growth_rate,
-            tax_rate,
+            self.income_statement, 
+            self.cash_flow,      
+            self.balance_sheet,  
+            discount_rate, # Resolved for valuations
+            terminal_growth_rate, # Resolved for valuations
+            valuation_tax_rate, # Resolved for valuations (e.g., for NOPAT)
             self.company_data 
         )
         dcf_results = self.dcf_valuation.calculate()
@@ -235,46 +301,35 @@ class ThreeStatementModel:
         self.comps_valuation = TradingCompsValuation(
             self.income_statement,
             self.balance_sheet,
-            ev_to_ebitda_multiple,
+            ev_to_ebitda_multiple, # Resolved for valuations
             self.company_data 
         )
         comps_results = self.comps_valuation.calculate()
         
-        # LBO valuation
-        lbo_exit_multiple = assumptions.get("lbo_exit_multiple", config.default_assumptions.get("lbo_exit_multiple", 8.0))
-        lbo_years = assumptions.get("lbo_years", config.default_assumptions.get("lbo_years", 5))
-        debt_to_ebitda = assumptions.get("debt_to_ebitda", config.default_assumptions.get("debt_to_ebitda", 6.0))
-        
+        # LBO valuation (uses valuation_tax_rate)
         self.lbo_valuation = LBOValuation(
             self.income_statement,
             self.cash_flow,
             self.balance_sheet,
-            lbo_exit_multiple,
-            lbo_years,
-            debt_to_ebitda,
-            discount_rate, # Re-use discount_rate from DCF assumptions
-            tax_rate,      # Re-use tax_rate
+            lbo_exit_multiple, # Resolved for valuations
+            lbo_years, # Resolved for valuations
+            lbo_debt_to_ebitda, # Resolved for valuations
+            discount_rate, 
+            valuation_tax_rate, # Resolved for valuations     
             self.company_data 
         )
         lbo_results = self.lbo_valuation.calculate()
         
-        # Capital structure grid
-        cap_structure_base_discount_rate = discount_rate # Use consistent discount rate
-        cap_structure_tax_rate = tax_rate             # Use consistent tax rate
-        # shares_outstanding_for_cap_grid = dcf_results.get("shares_outstanding", 1) 
-
+        # Capital structure grid (uses valuation related discount_rate and tax_rate)
         self.cap_structure_grid = CapitalStructureGrid(
             self.income_statement,
             self.balance_sheet,
             self.cash_flow,
-            cap_structure_base_discount_rate, 
-            cap_structure_tax_rate, 
-            self.company_data, 
-            assumptions 
+            discount_rate, 
+            valuation_tax_rate 
         )
         cap_structure_results = self.cap_structure_grid.calculate()
         
-        # Compile all results
         results = {
             "income_statement": self.income_statement.to_dict(orient="records"),
             "balance_sheet": self.balance_sheet.to_dict(orient="records"),
@@ -284,7 +339,6 @@ class ThreeStatementModel:
             "lbo_valuation": lbo_results,
             "capital_structure_grid": cap_structure_results
         }
-        
         return results
     
     def _project_income_statement(
@@ -292,9 +346,14 @@ class ThreeStatementModel:
         growth_rates: List[float], 
         gross_margins: List[float], 
         ebitda_margins: List[float],
-        assumptions: Dict[str, Any] # Added assumptions
+        effective_tax_rate: float, # Changed from assumptions: Dict
+        depreciation_percent_revenue: float,
+        interest_percent_operating_income: float
     ):
         """Project the income statement, combining historical and forecast periods."""
+        # Add this print:
+        print(f"[_project_income_statement] Received growth_rates: {growth_rates}, gross_margins: {gross_margins}, ebitda_margins: {ebitda_margins}")
+
         # Initialize with historical data if available
         if self.num_historical_periods > 0:
             # Select relevant IS columns from historical_statements_df
@@ -349,34 +408,36 @@ class ThreeStatementModel:
         # Project items for forecast years
         current_revenue = base_revenue
         
-        # Default projection ratios from assumptions or AppConfig
-        depreciation_percent_revenue = assumptions.get("depreciation_percent_revenue", config.default_assumptions.get("depreciation_percent_revenue", 0.05))
-        interest_percent_operating_income = assumptions.get("interest_percent_operating_income", config.default_assumptions.get("interest_percent_operating_income", 0.10))
-        effective_tax_rate = assumptions.get("tax_rate", config.default_assumptions.get("tax_rate", 0.21))
-
+        # Directly use passed-in resolved assumption values
+        # depreciation_percent_revenue = assumptions.get("depreciation_percent_revenue", config.default_assumptions.get("depreciation_percent_revenue", 0.05))
+        # interest_percent_operating_income = assumptions.get("interest_percent_operating_income", config.default_assumptions.get("interest_percent_operating_income", 0.10))
+        # effective_tax_rate = assumptions.get("tax_rate", config.default_assumptions.get("tax_rate", 0.21))
 
         for i, year_val in enumerate(forecast_period_years):
             period_data = {"year": year_val, "is_historical": False}
             
             # Project revenue
             growth_rate = growth_rates[i] if i < len(growth_rates) else self.historical_growth_rate
+            print(f"[_project_income_statement] Year {year_val} (idx {i}): Using growth_rate: {growth_rate}. From array: {i < len(growth_rates)}. Array val: {growth_rates[i] if i < len(growth_rates) else 'N/A'}. Historical: {self.historical_growth_rate}")
             current_revenue = current_revenue * (1 + growth_rate)
             period_data["revenue"] = current_revenue
             
             # Project gross profit
             gp_margin = gross_margins[i] if i < len(gross_margins) else self.historical_gross_margin
+            print(f"[_project_income_statement] Year {year_val} (idx {i}): Using gp_margin: {gp_margin}. From array: {i < len(gross_margins)}. Array val: {gross_margins[i] if i < len(gross_margins) else 'N/A'}. Historical: {self.historical_gross_margin}")
             period_data["gross_profit"] = current_revenue * gp_margin
             
             # Project EBITDA
             ebitda_m = ebitda_margins[i] if i < len(ebitda_margins) else self.historical_ebitda_margin
+            print(f"[_project_income_statement] Year {year_val} (idx {i}): Using ebitda_margin: {ebitda_m}. From array: {i < len(ebitda_margins)}. Array val: {ebitda_margins[i] if i < len(ebitda_margins) else 'N/A'}. Historical: {self.historical_ebitda_margin}")
             period_data["ebitda"] = current_revenue * ebitda_m
             
-            # Simplified projection of other income statement items
-            period_data["depreciation"] = period_data["revenue"] * depreciation_percent_revenue
+            # Project depreciation
+            period_data["depreciation"] = period_data["revenue"] * depreciation_percent_revenue # USE RESOLVED
             period_data["operating_income"] = period_data["ebitda"] - period_data["depreciation"]
-            period_data["interest_expense"] = period_data["operating_income"] * interest_percent_operating_income # Simplified
+            period_data["interest_expense"] = period_data["operating_income"] * interest_percent_operating_income # USE RESOLVED (Note: placeholder logic for interest)
             period_data["income_before_tax"] = period_data["operating_income"] - period_data["interest_expense"]
-            period_data["taxes"] = period_data["income_before_tax"] * effective_tax_rate
+            period_data["taxes"] = period_data["income_before_tax"] * effective_tax_rate # USE RESOLVED
             period_data["net_income"] = period_data["income_before_tax"] - period_data["taxes"]
             
             forecast_df_list.append(period_data)
@@ -393,7 +454,15 @@ class ThreeStatementModel:
             else:
                 self.income_statement[col] = 0.0
     
-    def _project_balance_sheet(self, assumptions: Dict[str, Any]): # Added assumptions
+    def _project_balance_sheet(
+        self,
+        receivable_days: float,
+        inventory_days: float,
+        payable_days: float,
+        capex_percent_revenue: float, 
+        base_fixed_assets_revenue_multiple: float,
+        resolved_debt_ratio_for_bs: float 
+    ): 
         """Project the balance sheet, combining historical and forecast periods."""
         bs_cols = ["year", "is_historical", "accounts_receivable", "inventory", "net_working_capital", 
                    "fixed_assets", "total_assets", "accounts_payable", "total_debt", "total_equity"]
@@ -411,23 +480,13 @@ class ThreeStatementModel:
         else:
             self.balance_sheet = pd.DataFrame(columns=bs_cols)
 
-        # Assumptions for projections
-        receivable_days = assumptions.get("receivable_days", config.default_assumptions.get("receivable_days", 45))
-        inventory_days = assumptions.get("inventory_days", config.default_assumptions.get("inventory_days", 60))
-        payable_days = assumptions.get("payable_days", config.default_assumptions.get("payable_days", 30))
-        base_fixed_assets_revenue_multiple = assumptions.get("base_fixed_assets_revenue_multiple", config.default_assumptions.get("base_fixed_assets_revenue_multiple", 0.70))
-        # base_fixed_assets_growth = assumptions.get("base_fixed_assets_growth", config.default_assumptions.get("base_fixed_assets_growth", 0.03)) # This will be driven by CapEx
-        target_debt_to_assets_ratio = assumptions.get("target_debt_to_assets_ratio", config.default_assumptions.get("target_debt_to_assets_ratio", 0.30))
-
         forecast_df_list = []
         
-        # Align with income statement periods (historical + forecast)
-        # Iterate through each period in the income_statement DataFrame
         for index, is_period_row in self.income_statement.iterrows():
             year_val = is_period_row["year"]
             is_hist = is_period_row["is_historical"]
 
-            if is_hist: # If historical, data should already be in self.balance_sheet
+            if is_hist:
                 if index < len(self.balance_sheet) and self.balance_sheet.loc[index, "year"] == year_val:
                     continue # Already populated
                 else: # Attempt to find matching year if alignment issues
@@ -460,26 +519,14 @@ class ThreeStatementModel:
                 # This needs to be iterative, using previous period's fixed assets
                 if not forecast_df_list and self.num_historical_periods > 0 and "fixed_assets" in self.balance_sheet.columns:
                     last_hist_fixed_assets = self.balance_sheet["fixed_assets"].iloc[self.num_historical_periods -1] if self.num_historical_periods > 0 else 0
-                elif forecast_df_list: # Not the first forecast period
+                elif forecast_df_list:
                     last_hist_fixed_assets = forecast_df_list[-1]["fixed_assets"]
-                else: # No historical, first forecast period
-                    last_hist_fixed_assets = revenue_forecast * base_fixed_assets_revenue_multiple # Initial estimate
-
-                # CapEx and Depreciation will be taken from Cash Flow statement for this period later.
-                # For now, this is a placeholder calculation that will be overridden by _project_cash_flow's update.
-                # Placeholder: Link to capex from cash_flow (which isn't projected yet in this step)
-                # This highlights the iterative nature; BS and CF are linked.
-                # We'll refine this after CF statement projection.
-                # Initial fixed assets based on previous or a ratio for the first projected year.
-                depreciation_current_period = self.income_statement.loc[self.income_statement['year'] == year_val, 'depreciation'].values[0]
+                else: 
+                    last_hist_fixed_assets = revenue_forecast * base_fixed_assets_revenue_multiple 
                 
-                # Placeholder for CapEx until CF is built. This means fixed assets might be initially simple.
-                # Typically, CapEx from CF statement is used here.
-                # The _project_cash_flow method will later update fixed_assets.
-                capex_current_period = revenue_forecast * assumptions.get("capex_percent_revenue", config.default_assumptions.get("capex_percent_revenue", 0.05)) # Placeholder
-
+                depreciation_current_period = self.income_statement.loc[self.income_statement['year'] == year_val, 'depreciation'].values[0]
+                capex_current_period = revenue_forecast * capex_percent_revenue 
                 period_data["fixed_assets"] = last_hist_fixed_assets + capex_current_period - depreciation_current_period
-
 
                 period_data["total_assets"] = (
                     period_data["accounts_receivable"] + 
@@ -487,29 +534,59 @@ class ThreeStatementModel:
                     period_data["fixed_assets"]
                 )
                 
-                period_data["total_debt"] = period_data["total_assets"] * target_debt_to_assets_ratio # Simplified
-                period_data["total_equity"] = period_data["total_assets"] - period_data["total_debt"] - period_data["accounts_payable"] # Simplified plug
+                period_data["total_debt"] = period_data["total_assets"] * resolved_debt_ratio_for_bs 
+                period_data["total_equity"] = period_data["total_assets"] - period_data["total_debt"] - period_data["accounts_payable"]
 
                 forecast_df_list.append(period_data)
         
         if forecast_df_list:
             forecast_bs_df = pd.DataFrame(forecast_df_list)
-            # If self.balance_sheet was populated with historicals, we need to append forecasts carefully
             if self.num_historical_periods > 0:
-                 # Filter forecast_bs_df to only include years not already in self.balance_sheet (historical part)
                 forecast_bs_df_to_append = forecast_bs_df[~forecast_bs_df['year'].isin(self.balance_sheet['year'])]
                 self.balance_sheet = pd.concat([self.balance_sheet, forecast_bs_df_to_append], ignore_index=True)
-            else: # No historicals, just use the forecast
+            else: 
                 self.balance_sheet = forecast_bs_df
         
+        # Iterative updates after initial forecast_df_list is populated and self.balance_sheet is formed
+        # This section updates BS based on CF, and might have the other uses of target_debt_to_assets_ratio
+        for index, global_period_row in self.income_statement.iterrows():
+            year_val = global_period_row["year"]
+            is_hist = global_period_row["is_historical"]
+            if is_hist: continue # Only for forecast periods
+
+            bs_indices = self.balance_sheet[self.balance_sheet["year"] == year_val].index
+            if not bs_indices.empty:
+                idx = bs_indices[0]
+                current_bs_row = self.balance_sheet.loc[idx]
+
+                # This block is for all forecast periods AFTER the first one in the iterative refinement
+                if index > self.num_historical_periods or (self.num_historical_periods == 0 and index > 0):
+                    # ... (fixed asset updates using capex/depreciation from CF would happen here or in CF projection)
+                    # Re-calculate total_assets if fixed_assets changed
+                    self.balance_sheet.loc[idx, "total_assets"] = (
+                        current_bs_row["net_working_capital"] + # Or current_bs_row["accounts_receivable"] + current_bs_row["inventory"]
+                        current_bs_row["fixed_assets"] 
+                        # Potentially add other current assets if modeled explicitly
+                    )
+                    total_assets_updated = self.balance_sheet.loc[idx, "total_assets"]
+                    # Ensure this uses the new parameter name
+                    self.balance_sheet.loc[idx, "total_debt"] = total_assets_updated * resolved_debt_ratio_for_bs
+                    self.balance_sheet.loc[idx, "total_equity"] = total_assets_updated - self.balance_sheet.loc[idx, "total_debt"] - current_bs_row["accounts_payable"]
+                elif self.num_historical_periods == 0 and index == 0: # Very first period of a no-history model
+                    # This was handled in the initial loop, but ensure consistency if re-evaluating total_debt
+                    total_assets_current_period = self.balance_sheet.loc[idx, "total_assets"]
+                    # Ensure this uses the new parameter name
+                    self.balance_sheet.loc[idx, "total_debt"] = total_assets_current_period * resolved_debt_ratio_for_bs
+                    self.balance_sheet.loc[idx, "total_equity"] = total_assets_current_period - self.balance_sheet.loc[idx, "total_debt"] - self.balance_sheet.loc[idx, "accounts_payable"]
+
         for col in bs_cols:
-            if col not in ["year", "is_historical"]: # Ensure these are numeric
+            if col not in ["year", "is_historical"]: 
                  if col in self.balance_sheet.columns:
                     self.balance_sheet[col] = pd.to_numeric(self.balance_sheet[col], errors='coerce').fillna(0)
                  else:
                     self.balance_sheet[col] = 0.0
     
-    def _project_cash_flow(self, assumptions: Dict[str, Any]): # Added assumptions
+    def _project_cash_flow(self, capex_percent_revenue: float, resolved_debt_ratio_for_bs: float): 
         """Project the cash flow statement, combining historical and forecast periods."""
         cf_cols = ["year", "is_historical", "net_income", "depreciation", "change_in_working_capital",
                    "operating_cash_flow", "capex", "free_cash_flow"]
@@ -533,9 +610,6 @@ class ThreeStatementModel:
             self.cash_flow = historical_cf_df[cf_cols].copy()
         else:
             self.cash_flow = pd.DataFrame(columns=cf_cols)
-
-        # Assumptions
-        capex_percent_revenue = assumptions.get("capex_percent_revenue", config.default_assumptions.get("capex_percent_revenue", 0.05))
 
         forecast_df_list = []
 
@@ -589,1829 +663,79 @@ class ThreeStatementModel:
                     period_data["change_in_working_capital"]
                 )
                 
-                period_data["capex"] = -is_row["revenue"] * capex_percent_revenue # Negative for outflow
+                period_data["capex"] = -is_row["revenue"] * capex_percent_revenue # USE RESOLVED, ensure negative for outflow
                 
                 period_data["free_cash_flow"] = period_data["operating_cash_flow"] + period_data["capex"]
                 
                 forecast_df_list.append(period_data)
 
                 # Update Balance Sheet Fixed Assets based on this period's CapEx and Depreciation
-                # This is the iterative step linking CF back to BS
-                bs_idx_to_update = self.balance_sheet[self.balance_sheet["year"] == year_val].index
-                if not bs_idx_to_update.empty:
-                    idx = bs_idx_to_update[0]
-                    # Get previous period's fixed assets
-                    if prev_year_val:
+            # This is the iterative step linking Cash Flow and Balance Sheet
+            # Find the corresponding row in the balance sheet
+            bs_indices = self.balance_sheet[self.balance_sheet["year"] == year_val].index
+            if not bs_indices.empty:
+                idx = bs_indices[0]
+                
+                if index > 0: # Not first period
+                    prev_year_val = year_val - 1
+                    if self.num_historical_periods > 0 and prev_year_val == self.latest_historical_year:
+                        # Get last historical fixed assets
                         prev_fa_series = self.balance_sheet.loc[self.balance_sheet['year'] == prev_year_val, 'fixed_assets']
                         prev_fixed_assets = prev_fa_series.values[0] if not prev_fa_series.empty else 0
-                    else: # First year overall
+                    else:
                          prev_fixed_assets = 0
-                    
+                        
                     self.balance_sheet.loc[idx, "fixed_assets"] = (
                         prev_fixed_assets +
-                        abs(period_data["capex"]) - # CapEx is stored negative, use abs
-                        period_data["depreciation"]
+                        period_data["capex"] +  # Already negative for outflow
+                        period_data["depreciation"] # Already negative for reduction
                     )
-                    # Re-calculate total assets after fixed assets update (if necessary, or ensure it's calculated after this loop)
+                    
+                    # Update total assets
                     self.balance_sheet.loc[idx, "total_assets"] = (
-                        self.balance_sheet.loc[idx, "accounts_receivable"] +
-                        self.balance_sheet.loc[idx, "inventory"] + # Assuming inventory is current assets part
+                        bs_row["net_working_capital"] +
                         self.balance_sheet.loc[idx, "fixed_assets"] # Other current assets might be missing
                     )
-                    # And potentially re-plug debt/equity if they depend on total_assets and were simple ratios
-                    target_debt_to_assets_ratio = assumptions.get("target_debt_to_assets_ratio", config.default_assumptions.get("target_debt_to_assets_ratio", 0.30))
-                    self.balance_sheet.loc[idx, "total_debt"] = self.balance_sheet.loc[idx, "total_assets"] * target_debt_to_assets_ratio
-                    self.balance_sheet.loc[idx, "total_equity"] = ( self.balance_sheet.loc[idx, "total_assets"] 
-                                                                  - self.balance_sheet.loc[idx, "total_debt"] 
-                                                                  - self.balance_sheet.loc[idx, "accounts_payable"])
-
-
-        if forecast_df_list:
-            forecast_cf_df = pd.DataFrame(forecast_df_list)
-            if self.num_historical_periods > 0:
-                forecast_cf_df_to_append = forecast_cf_df[~forecast_cf_df['year'].isin(self.cash_flow['year'])]
-                self.cash_flow = pd.concat([self.cash_flow, forecast_cf_df_to_append], ignore_index=True)
-            else:
-                self.cash_flow = forecast_cf_df
-
-        for col in cf_cols:
-            if col not in ["year", "is_historical"]:
-                if col in self.cash_flow.columns:
-                    self.cash_flow[col] = pd.to_numeric(self.cash_flow[col], errors='coerce').fillna(0)
+                    
+                    # Update total debt and equity based on target debt ratio
+                    total_assets = self.balance_sheet.loc[idx, "total_assets"]
+                    self.balance_sheet.loc[idx, "total_debt"] = total_assets * resolved_debt_ratio_for_bs # Use new_param_name
+                    self.balance_sheet.loc[idx, "total_equity"] = total_assets - self.balance_sheet.loc[idx, "total_debt"]
                 else:
-                    self.cash_flow[col] = 0.0
-        # Ensure fixed assets are updated on BS for all forecast years after CF is built
-        # The loop above tries to do it iteratively, but a final pass might be good for consistency
-        # This iterative update is complex; for simplicity, the above updates BS fixed assets during CF calc.
-            
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-# and `_project_cash_flow`.
-
-# Ensure the old _calculate_historical_metrics is removed or fully commented out.
-# ... existing code ...
-# (Ensure to remove the old _calculate_historical_metrics function that takes `income_statements: List[Dict[str, Any]]`)
-# The edit should be applied starting from the line before `def build_model(...)`
-# and including the modifications to `_project_income_statement`, `_project_balance_sheet`, 
-        base_revenue_for_bs = self.latest_income.get("revenue", 0) # Default to 0
-        base_fixed_assets = base_revenue_for_bs * base_fixed_assets_revenue_multiple
-        fixed_assets = [base_fixed_assets]
-        
-        for i in range(1, self.forecast_years + 1):
-            # This will be refined when we project the cash flow statement
-            # For now, a simplistic growth based on assumption
-            fixed_assets.append(fixed_assets[-1] * (1 + base_fixed_assets_growth))
-        
-        self.balance_sheet["fixed_assets"] = fixed_assets
-        
-        # Total assets
-        self.balance_sheet["total_assets"] = (
-            self.balance_sheet["accounts_receivable"] + 
-            self.balance_sheet["inventory"] + 
-            self.balance_sheet["fixed_assets"]
-        )
-        
-        # Simplified debt and equity projection
-        # Assuming a target debt-to-assets ratio from assumptions
-        self.balance_sheet["total_debt"] = self.balance_sheet["total_assets"] * target_debt_to_assets_ratio
-        self.balance_sheet["total_equity"] = self.balance_sheet["total_assets"] - self.balance_sheet["total_debt"] - self.balance_sheet["accounts_payable"]
-    
-    def _project_cash_flow(self, capex_percent: float):
-        """Project the cash flow statement for the forecast period."""
-        # capex_percent is already from assumptions
-        # Ensure it's used if not overridden by more direct capex logic later
-
-        # Create a base DataFrame with the same index as income statement
-        self.cash_flow = pd.DataFrame(index=self.income_statement.index)
-        
-        # Start with operating cash flow
-        self.cash_flow["net_income"] = self.income_statement["net_income"]
-        self.cash_flow["depreciation"] = self.income_statement["depreciation"]
-        
-        # Changes in working capital
-        for i in range(len(self.income_statement.index)):
-            if i == 0:
-                self.cash_flow.loc[i, "change_in_working_capital"] = 0
+                    # First forecast period - initialize based on revenue
+                    base_revenue_for_bs = is_row["revenue"]
+                    # base_fixed_assets_revenue_multiple is already a resolved parameter passed to this method
+                    # No need to call assumptions.get here.
+                    # base_fixed_assets_revenue_multiple = assumptions.get("base_fixed_assets_revenue_multiple", config.default_assumptions.get("base_fixed_assets_revenue_multiple", 0.70))
+                    current_fixed_assets = base_revenue_for_bs * base_fixed_assets_revenue_multiple
+                    self.balance_sheet.loc[idx, "fixed_assets"] = current_fixed_assets
+                    
+                    # Project forward based on growth was removed as it was using an undefined variable
+                    # and fixed assets should be driven by capex and depreciation primarily.
+                    # The iterative updates via _project_cash_flow handle this.
+                    
+                    # Update total assets for the first forecast period
+                    self.balance_sheet.loc[idx, "total_assets"] = (
+                        self.balance_sheet.loc[idx, "net_working_capital"] + # NWC for current year already calculated
+                        current_fixed_assets
+                    )
+                    
+                    # Update total debt and equity based on target ratio for the first forecast period
+                    total_assets_current_period = self.balance_sheet.loc[idx, "total_assets"]
+                    self.balance_sheet.loc[idx, "total_debt"] = total_assets_current_period * resolved_debt_ratio_for_bs # Use new_param_name
+                    self.balance_sheet.loc[idx, "total_equity"] = total_assets_current_period - self.balance_sheet.loc[idx, "total_debt"]
+
+        # Combine historical and forecast periods
+        if forecast_df_list:
+            forecast_df = pd.DataFrame(forecast_df_list)
+            if not self.cash_flow.empty:
+                self.cash_flow = pd.concat([self.cash_flow, forecast_df], ignore_index=True)
             else:
-                self.cash_flow.loc[i, "change_in_working_capital"] = -(
-                    self.balance_sheet.loc[i, "net_working_capital"] - 
-                    self.balance_sheet.loc[i-1, "net_working_capital"]
-                )
-        
-        # Operating cash flow
-        self.cash_flow["operating_cash_flow"] = (
-            self.cash_flow["net_income"] + 
-            self.cash_flow["depreciation"] + 
-            self.cash_flow["change_in_working_capital"]
-        )
-        
-        # Capital expenditures
-        self.cash_flow["capex"] = -self.income_statement["revenue"] * capex_percent
-        
-        # Free cash flow
-        self.cash_flow["free_cash_flow"] = self.cash_flow["operating_cash_flow"] + self.cash_flow["capex"]
-        
-        # Update fixed assets projection based on capex and depreciation
-        for i in range(1, self.forecast_years + 1):
-            self.balance_sheet.loc[i, "fixed_assets"] = (
-                self.balance_sheet.loc[i-1, "fixed_assets"] + 
-                abs(self.cash_flow.loc[i, "capex"]) - 
-                self.income_statement.loc[i, "depreciation"]
-            ) 
+                self.cash_flow = forecast_df
+
+        # Convert numeric columns to float and fill NaN with 0
+        for col in cf_cols:
+            if col not in ["year", "is_historical"] and col in self.cash_flow.columns:
+                self.cash_flow[col] = pd.to_numeric(self.cash_flow[col], errors='coerce').fillna(0)
+    
+

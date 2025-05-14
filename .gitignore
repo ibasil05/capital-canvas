@@ -1,0 +1,39 @@
+# Environment variables
+.env
+.env.*
+!/.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE / Editor specific
+.vscode/
+.idea/
+*.swp
+*.swo
+.cursor/rules
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Build artifacts / Distribution
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Coverage reports
+.coverage
+htmlcov/
+
+# Other temporary/generated files
+*.log
+*.tmp
+*.bak

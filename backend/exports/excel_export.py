@@ -32,6 +32,54 @@ async def generate_excel_export(model_results_data: Dict[str, Any]) -> bytes:
     # Each record has: year, is_historical, revenue, gross_profit, ebitda, etc.
     financial_statements = model_results_data.get('financial_statements', [])
     
+    # ---------------------------------------------------------------
+    # Fallback: If financial_statements list is missing/empty but we
+    # have the flattened income_statement/balance_sheet/cash_flow
+    # dictionaries (added by _flatten_results_for_export), rebuild a
+    # list structure that _populate_financial_statement_sheet expects.
+    # ---------------------------------------------------------------
+    if not financial_statements:
+        from datetime import datetime
+
+        income_dict: Dict[str, Dict[str, Any]] = model_results_data.get('income_statement', {}) or {}
+        balance_dict: Dict[str, Dict[str, Any]] = model_results_data.get('balance_sheet', {}) or {}
+        cash_dict: Dict[str, Dict[str, Any]] = model_results_data.get('cash_flow', {}) or {}
+
+        # Collect the union of all year keys across the three statements
+        all_years = set()
+        for metric_map in [income_dict, balance_dict, cash_dict]:
+            for year_key in metric_map.values():
+                all_years.update(year_key.keys())
+
+        current_year = datetime.utcnow().year
+        financial_statements = []
+        for yr in sorted(all_years):
+            try:
+                year_int = int(yr)
+            except ValueError:
+                # Skip malformed year keys
+                continue
+
+            period_record: Dict[str, Any] = {
+                "year": year_int,
+                # Treat any year up to current_year as historical
+                "is_historical": year_int <= current_year
+            }
+
+            # Merge metrics from each statement dict
+            for metric, year_map in income_dict.items():
+                if yr in year_map:
+                    period_record[metric] = year_map[yr]
+            for metric, year_map in balance_dict.items():
+                if yr in year_map:
+                    period_record[metric] = year_map[yr]
+            for metric, year_map in cash_dict.items():
+                if yr in year_map:
+                    period_record[metric] = year_map[yr]
+
+            financial_statements.append(period_record)
+
+    # Only create the statement sheets if we now have data
     if financial_statements:
         is_sheet = workbook.create_sheet(title="Income Statement")
         _populate_financial_statement_sheet(is_sheet, financial_statements, statement_type='income_statement')
@@ -57,17 +105,18 @@ async def generate_excel_export(model_results_data: Dict[str, Any]) -> bytes:
 
     # Adjust column widths for all sheets
     for sheet in workbook.worksheets:
-        for col in sheet.columns:
+        for col_idx in range(1, sheet.max_column + 1):
+            column_letter = get_column_letter(col_idx)
             max_length = 0
-            column = col[0].column_letter # Get the column name
-            for cell in col:
+            for row_idx in range(1, sheet.max_row + 1):
+                cell = sheet.cell(row=row_idx, column=col_idx)
                 try:
-                    if len(str(cell.value)) > max_length:
+                    if cell.value is not None and len(str(cell.value)) > max_length:
                         max_length = len(str(cell.value))
-                except:
+                except Exception:
                     pass
-            adjusted_width = (max_length + 2)
-            sheet.column_dimensions[column].width = adjusted_width
+            adjusted_width = max_length + 2
+            sheet.column_dimensions[column_letter].width = adjusted_width
 
     excel_file = io.BytesIO()
     workbook.save(excel_file)
@@ -113,14 +162,14 @@ def _populate_summary_sheet(sheet, data: Dict[str, Any]):
     _write_cell(sheet, row_idx, 1, "Valuation Summary", font=HEADING_FONT)
     row_idx += 1
     valuation = data.get('valuation', {})
-    dcf_results = valuation.get('dcf_valuation', {})
-    comps_results = valuation.get('trading_comps_valuation', {})
-    lbo_results = valuation.get('lbo_analysis', {})
+    dcf_results = valuation.get('dcf_valuation') or data.get('dcf_valuation', {})
+    comps_results = valuation.get('trading_comps_valuation') or data.get('trading_comps_valuation', {})
+    lbo_results = valuation.get('lbo_analysis') or valuation.get('lbo_valuation') or data.get('lbo_valuation', {})
     
     valuation_summary_map = {
         "DCF Implied Share Price": dcf_results.get("price_per_share"),
         "Trading Comps Implied Share Price": comps_results.get("price_per_share"),
-        "LBO Implied Equity IRR": lbo_results.get("implied_irr") if lbo_results else None,
+        "LBO Implied Equity IRR": lbo_results.get("equity_irr") if lbo_results else None,
         "Current Market Price": data.get('company_data', {}).get('profile',{}).get('price') # Assuming it might be here
     }
     for key, val in valuation_summary_map.items():
@@ -137,7 +186,7 @@ def _populate_financial_statement_sheet(sheet, financial_statements: List[Dict[s
     if not financial_statements:
         return
 
-    headers = ["Metric"] + [f'{fs["year"]} ({'H' if fs["is_historical"] else 'F'})' for fs in financial_statements]
+    headers = ["Metric"] + [f'{fs["year"]} ({"H" if fs["is_historical"] else "F"})' for fs in financial_statements]
     for col_idx, header in enumerate(headers, 1):
         _write_cell(sheet, 1, col_idx, header, font=SUBHEADING_FONT, alignment=CENTER_ALIGN, border=THIN_BORDER)
 

@@ -5,7 +5,7 @@ Valuation engine implementations for DCF, Trading Comps, and LBO.
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Any, Optional, Tuple
-from backend.data_providers.provider_factory import get_data_provider
+from data_providers.provider_factory import get_data_provider
 
 class DCFValuation:
     """Discounted Cash Flow valuation model"""
@@ -102,9 +102,23 @@ class DCFValuation:
         Returns:
             Terminal value
         """
+        # Handle edge cases
+        if final_year_fcf <= 0:
+            return 0.0
+            
+        # Ensure terminal growth rate is less than discount rate
+        if self.terminal_growth_rate >= self.discount_rate:
+            # Cap terminal growth at discount rate - 1%
+            effective_growth_rate = self.discount_rate - 0.01
+        else:
+            effective_growth_rate = self.terminal_growth_rate
+            
         # Terminal value = FCF * (1 + g) / (WACC - g)
         # Where g is the terminal growth rate
-        return final_year_fcf * (1 + self.terminal_growth_rate) / (self.discount_rate - self.terminal_growth_rate)
+        try:
+            return final_year_fcf * (1 + effective_growth_rate) / (self.discount_rate - effective_growth_rate)
+        except:
+            return 0.0
     
     def _get_shares_outstanding(self) -> float:
         """
@@ -325,13 +339,15 @@ class LBOValuation:
         
         return {
             "entry_enterprise_value": entry_ev,
-            "entry_equity_value": initial_equity,
-            "entry_debt": initial_debt,
+            "entry_equity_value": initial_equity,  # legacy name expected by schema
+            "entry_debt": initial_debt,            # legacy name expected by export / other modules
+            "equity_investment": initial_equity,
+            "debt_investment": initial_debt,
             "exit_enterprise_value": exit_ev,
             "exit_equity_value": exit_equity,
             "remaining_debt": remaining_debt,
             "equity_irr": equity_irr,
-            "cash_on_cash": cash_on_cash,
+            "cash_on_cash_multiple": cash_on_cash if initial_equity > 0 else 0.0,
             "entry_debt_to_ebitda": entry_debt_to_ebitda,
             "exit_debt_to_ebitda": exit_debt_to_ebitda,
             "exit_multiple": self.exit_multiple,
@@ -353,9 +369,15 @@ class LBOValuation:
         Returns:
             IRR as a decimal
         """
-        # Simplified IRR calculation using the formula for a single cash flow at exit
-        # IRR = (Exit Value / Initial Investment) ^ (1/years) - 1
-        return (exit_value / initial_investment) ** (1 / years) - 1
+        # Handle edge cases
+        if initial_investment <= 0 or exit_value <= 0:
+            return 0.0
+            
+        try:
+            # Simple IRR calculation assuming only initial investment and exit value
+            return np.power(exit_value / initial_investment, 1.0 / years) - 1
+        except:
+            return 0.0
     
     def _get_shares_outstanding(self) -> float:
         """

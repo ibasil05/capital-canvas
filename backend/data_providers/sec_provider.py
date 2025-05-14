@@ -7,8 +7,8 @@ import httpx
 from typing import Dict, Any, List, Optional
 from fastapi import HTTPException, status
 
-from backend.config import config
-from backend.data_providers.base import DataProviderInterface
+from config import config
+from data_providers.base import DataProviderInterface
 
 class SECProvider(DataProviderInterface):
     """SEC API provider implementation (sec-api.io)"""

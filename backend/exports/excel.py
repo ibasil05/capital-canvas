@@ -13,7 +13,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment, Color
 from openpyxl.chart import LineChart, Reference, BarChart, Series
 
-from backend.config import config
+from config import config
 
 class ExcelExport:
     """Excel export handler for financial models"""

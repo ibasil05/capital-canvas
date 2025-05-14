@@ -6,6 +6,12 @@ Uses Pydantic for data validation and conversion.
 from typing import Dict, List, Optional, Any, Union
 from pydantic import BaseModel, Field, validator
 import re
+from enum import Enum
+from datetime import date
+
+class ExportType(str, Enum):
+    EXCEL = "Excel"
+    PPT = "PPT"
 
 class CompanyInfoRequest(BaseModel):
     """Request model for fetching company information"""
@@ -35,9 +41,7 @@ class ModelAssumptionsRequest(BaseModel):
     )
     terminal_growth_rate: float = Field(
         ..., 
-        description="Long-term growth rate used for terminal value",
-        ge=0.01,
-        le=0.05
+        description="Long-term growth rate used for terminal value"
     )
     
     # Margin assumptions
@@ -78,8 +82,7 @@ class ModelAssumptionsRequest(BaseModel):
     discount_rate: float = Field(
         ..., 
         description="Weighted average cost of capital (WACC)",
-        ge=0.05,
-        le=0.25
+        gt=0
     )
     tax_rate: float = Field(
         ..., 
@@ -92,20 +95,19 @@ class ModelAssumptionsRequest(BaseModel):
     ev_to_ebitda_multiple: float = Field(
         ..., 
         description="EV/EBITDA multiple for terminal value",
-        ge=1
+        gt=0
     )
     
     # LBO assumptions
     lbo_exit_multiple: float = Field(
         ..., 
         description="Exit EV/EBITDA multiple for LBO",
-        ge=1
+        gt=0
     )
     lbo_years: int = Field(
         ..., 
         description="LBO holding period in years",
-        ge=3,
-        le=10
+        ge=1
     )
     debt_to_ebitda: float = Field(
         ..., 
@@ -140,6 +142,11 @@ class ModelAssumptionsRequest(BaseModel):
         
         return v
 
+class ExportRequest(BaseModel):
+    model_id: str
+    export_type: ExportType
+    model_config = {"protected_namespaces": ()}
+
 class CreateModelRequest(BaseModel):
     """Request model for creating a new financial model"""
     ticker: str = Field(..., description="Company stock ticker symbol")
@@ -162,7 +169,4 @@ class CreateModelRequest(BaseModel):
 
 class UpdateModelRequest(BaseModel):
     """Request model for updating an existing financial model"""
-    assumptions: ModelAssumptionsRequest = Field(
-        ..., 
-        description="Updated financial model assumptions"
-    ) 
+    assumptions: Optional[Dict[str, Any]] = None

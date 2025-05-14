@@ -14,7 +14,7 @@ from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
 
-from backend.config import config
+from config import config
 
 class PowerPointExport:
     """PowerPoint export handler for financial models"""
@@ -49,24 +49,24 @@ class PowerPointExport:
         Returns:
             PowerPoint file as bytes
         """
-        # Create title slide
-        self._create_title_slide()
-        
-        # Create model summary slide
-        self._create_summary_slide()
-        
-        # Create valuation slides
-        self._create_dcf_valuation_slide()
-        self._create_comps_valuation_slide()
-        self._create_lbo_analysis_slide()
-        
-        # Create financial statements slides
-        self._create_income_statement_slide()
-        self._create_balance_sheet_slide()
-        self._create_cash_flow_slide()
-        
-        # Create capital structure slide
-        self._create_capital_structure_slide()
+        slide_methods = [
+            self._create_title_slide,
+            self._create_summary_slide,
+            self._create_dcf_valuation_slide,
+            self._create_comps_valuation_slide,
+            self._create_lbo_analysis_slide,
+            self._create_income_statement_slide,
+            self._create_balance_sheet_slide,
+            self._create_cash_flow_slide,
+            self._create_capital_structure_slide,
+        ]
+
+        for method in slide_methods:
+            try:
+                method()
+            except Exception as slide_err:
+                # Log and continue building remaining slides
+                print(f"[PowerPointExport] Skipping slide {method.__name__} due to error: {slide_err}")
         
         # Save to bytes IO
         output = io.BytesIO()
@@ -81,10 +81,19 @@ class PowerPointExport:
         slide = self.prs.slides.add_slide(slide_layout)
         
         title = slide.shapes.title
-        subtitle = slide.placeholders[1]
+        subtitle = None
+        try:
+            subtitle = slide.placeholders[1]
+        except IndexError:
+            # Some templates may not have a second placeholder; fall back to adding a textbox
+            subtitle_box = slide.shapes.add_textbox(Inches(1), Inches(2.5), Inches(8), Inches(1))
+            subtitle = subtitle_box.text_frame
         
         title.text = f"{self.company_name} ({self.ticker})"
-        subtitle.text = "Financial Model & Valuation Analysis"
+        if hasattr(subtitle, "text"):
+            subtitle.text = "Financial Model & Valuation Analysis"
+        else:
+            subtitle.text = "Financial Model & Valuation Analysis"  # TextFrame also supports .text
     
     def _create_summary_slide(self):
         """Create the model summary slide"""
@@ -130,17 +139,17 @@ class PowerPointExport:
         
         metrics = [
             ["Enterprise Value", 
-             f"${dcf_data.get('enterprise_value', 0)/1_000_000_000:.1f}B", 
-             f"${comps_data.get('enterprise_value', 0)/1_000_000_000:.1f}B", 
-             f"${lbo_data.get('entry_enterprise_value', 0)/1_000_000_000:.1f}B"],
+             f"${fmt_num(dcf_data.get('enterprise_value'), 1_000_000_000, suffix='B')}", 
+             f"${fmt_num(comps_data.get('enterprise_value'), 1_000_000_000, suffix='B')}", 
+             f"${fmt_num(lbo_data.get('entry_enterprise_value'), 1_000_000_000, suffix='B')}"],
             ["Equity Value", 
-             f"${dcf_data.get('equity_value', 0)/1_000_000_000:.1f}B", 
-             f"${comps_data.get('equity_value', 0)/1_000_000_000:.1f}B", 
-             f"${lbo_data.get('entry_equity_value', 0)/1_000_000_000:.1f}B"],
+             f"${fmt_num(dcf_data.get('equity_value'), 1_000_000_000, suffix='B')}", 
+             f"${fmt_num(comps_data.get('equity_value'), 1_000_000_000, suffix='B')}", 
+             f"${fmt_num(lbo_data.get('entry_equity_value'), 1_000_000_000, suffix='B')}"],
             ["Share Price / IRR", 
-             f"${dcf_data.get('price_per_share', 0):.2f}", 
-             f"${comps_data.get('price_per_share', 0):.2f}", 
-             f"{lbo_data.get('equity_irr', 0)*100:.1f}%"]
+             f"${fmt_num(dcf_data.get('price_per_share'), precision=2)}", 
+             f"${fmt_num(comps_data.get('price_per_share'), precision=2)}", 
+             f"{fmt_num(lbo_data.get('equity_irr'), pct=True)}%"]
         ]
         
         for i, row_data in enumerate(metrics):
@@ -177,13 +186,15 @@ class PowerPointExport:
             chart_data.add_series('EBITDA ($B)', ebitda)
             
             x, y, cx, cy = Inches(1), Inches(3.5), Inches(8), Inches(3.5)
-            chart = slide.shapes.add_chart(
-                XL_CHART_TYPE.COLUMN_CLUSTERED, x, y, cx, cy, chart_data
-            ).chart
-            
-            chart.has_legend = True
-            chart.has_title = True
-            chart.chart_title.text_frame.text = "Revenue and EBITDA Forecast"
+            try:
+                chart = slide.shapes.add_chart(
+                    XL_CHART_TYPE.COLUMN_CLUSTERED, x, y, cx, cy, chart_data
+                ).chart
+                chart.has_legend = True
+                chart.has_title = True
+                chart.chart_title.text_frame.text = "Revenue and EBITDA Forecast"
+            except Exception as chart_err:
+                print(f"[PowerPointExport] Skipping summary chart due to error: {chart_err}")
     
     def _create_dcf_valuation_slide(self):
         """Create the DCF valuation slide"""
@@ -196,20 +207,26 @@ class PowerPointExport:
         # Add DCF key metrics and assumptions
         dcf_data = self.model_data.get("dcf_valuation", {})
         
-        content = slide.placeholders[1].text_frame
+        # Try to get content placeholder; fallback to new textbox
+        try:
+            content_tf = slide.placeholders[1].text_frame
+        except IndexError:
+            content_tf = slide.shapes.add_textbox(Inches(0.5), Inches(1.5), Inches(8.5), Inches(6)).text_frame
+        content = content_tf
+        
         p = content.paragraphs[0]
         p.text = "Key Metrics and Assumptions"
         p.font.bold = True
         p.font.size = Pt(18)
         
         metrics = [
-            ("Discount Rate (WACC)", f"{dcf_data.get('discount_rate', 0.1)*100:.1f}%"),
-            ("Terminal Growth Rate", f"{dcf_data.get('terminal_growth_rate', 0.025)*100:.1f}%"),
-            ("PV of Forecast Cash Flows", f"${dcf_data.get('pv_forecast_fcf', 0)/1_000_000_000:.1f}B"),
-            ("PV of Terminal Value", f"${dcf_data.get('pv_terminal_value', 0)/1_000_000_000:.1f}B"),
-            ("Enterprise Value", f"${dcf_data.get('enterprise_value', 0)/1_000_000_000:.1f}B"),
-            ("Equity Value", f"${dcf_data.get('equity_value', 0)/1_000_000_000:.1f}B"),
-            ("Implied Share Price", f"${dcf_data.get('price_per_share', 0):.2f}")
+            ("Discount Rate (WACC)", f"{fmt_num(dcf_data.get('discount_rate'), pct=True)}%"),
+            ("Terminal Growth Rate", f"{fmt_num(dcf_data.get('terminal_growth_rate'), pct=True)}%"),
+            ("PV of Forecast Cash Flows", f"${fmt_num(dcf_data.get('pv_forecast_fcf'), 1_000_000_000, suffix='B')}"),
+            ("PV of Terminal Value", f"${fmt_num(dcf_data.get('pv_terminal_value'), 1_000_000_000, suffix='B')}"),
+            ("Enterprise Value", f"${fmt_num(dcf_data.get('enterprise_value'), 1_000_000_000, suffix='B')}"),
+            ("Equity Value", f"${fmt_num(dcf_data.get('equity_value'), 1_000_000_000, suffix='B')}"),
+            ("Implied Share Price", f"${fmt_num(dcf_data.get('price_per_share'), precision=2)}")
         ]
         
         for metric, value in metrics:
@@ -233,13 +250,15 @@ class PowerPointExport:
         chart_data.add_series('Value ($B)', [pv_fcf, pv_tv, -net_debt, pv_fcf + pv_tv - net_debt])
         
         x, y, cx, cy = Inches(5), Inches(2), Inches(4), Inches(4)
-        chart = slide.shapes.add_chart(
-            XL_CHART_TYPE.COLUMN_CLUSTERED, x, y, cx, cy, chart_data
-        ).chart
-        
-        chart.has_legend = False
-        chart.has_title = True
-        chart.chart_title.text_frame.text = "DCF Value Bridge"
+        try:
+            chart = slide.shapes.add_chart(
+                XL_CHART_TYPE.COLUMN_CLUSTERED, x, y, cx, cy, chart_data
+            ).chart
+            chart.has_legend = False
+            chart.has_title = True
+            chart.chart_title.text_frame.text = "DCF Value Bridge"
+        except Exception as chart_err:
+            print(f"[PowerPointExport] Skipping DCF chart due to error: {chart_err}")
     
     def _create_comps_valuation_slide(self):
         """Create the trading comps valuation slide"""
@@ -252,20 +271,26 @@ class PowerPointExport:
         # Add trading comps metrics
         comps_data = self.model_data.get("trading_comps_valuation", {})
         
-        content = slide.placeholders[1].text_frame
+        # Try to get content placeholder; fallback to new textbox
+        try:
+            content_tf = slide.placeholders[1].text_frame
+        except IndexError:
+            content_tf = slide.shapes.add_textbox(Inches(0.5), Inches(1.5), Inches(8.5), Inches(6)).text_frame
+        content = content_tf
+        
         p = content.paragraphs[0]
         p.text = "Valuation Metrics"
         p.font.bold = True
         p.font.size = Pt(18)
         
         metrics = [
-            ("Forward EBITDA", f"${comps_data.get('forward_ebitda', 0)/1_000_000:.1f}M"),
-            ("EV/EBITDA Multiple", f"{comps_data.get('ev_to_ebitda', 8.0):.1f}x"),
-            ("EV/Revenue Multiple", f"{comps_data.get('ev_to_revenue', 2.0):.1f}x"),
-            ("P/E Ratio", f"{comps_data.get('price_to_earnings', 15.0):.1f}x"),
-            ("Enterprise Value", f"${comps_data.get('enterprise_value', 0)/1_000_000_000:.1f}B"),
-            ("Equity Value", f"${comps_data.get('equity_value', 0)/1_000_000_000:.1f}B"),
-            ("Implied Share Price", f"${comps_data.get('price_per_share', 0):.2f}")
+            ("Forward EBITDA", f"${fmt_num(comps_data.get('forward_ebitda'), 1_000_000, suffix='M')}"),
+            ("EV/EBITDA Multiple", f"{fmt_num(comps_data.get('ev_to_ebitda'), suffix='x')}"),
+            ("EV/Revenue Multiple", f"{fmt_num(comps_data.get('ev_to_revenue'), suffix='x')}"),
+            ("P/E Ratio", f"{fmt_num(comps_data.get('price_to_earnings'), suffix='x')}"),
+            ("Enterprise Value", f"${fmt_num(comps_data.get('enterprise_value'), 1_000_000_000, suffix='B')}"),
+            ("Equity Value", f"${fmt_num(comps_data.get('equity_value'), 1_000_000_000, suffix='B')}"),
+            ("Implied Share Price", f"${fmt_num(comps_data.get('price_per_share'), precision=2)}")
         ]
         
         for metric, value in metrics:
@@ -311,9 +336,9 @@ class PowerPointExport:
         # Add peer data
         for i, peer in enumerate(peers):
             table.cell(i+1, 0).text = peer.get("ticker", "")
-            table.cell(i+1, 1).text = f"{peer.get('ev_to_ebitda', 0):.1f}x"
-            table.cell(i+1, 2).text = f"{peer.get('ev_to_revenue', 0):.1f}x"
-            table.cell(i+1, 3).text = f"{peer.get('price_to_earnings', 0):.1f}x"
+            table.cell(i+1, 1).text = f"{fmt_num(peer.get('ev_to_ebitda'), suffix='x')}"
+            table.cell(i+1, 2).text = f"{fmt_num(peer.get('ev_to_revenue'), suffix='x')}"
+            table.cell(i+1, 3).text = f"{fmt_num(peer.get('price_to_earnings'), suffix='x')}"
         
         # Add median row
         median_row = len(peers) + 1
@@ -328,9 +353,9 @@ class PowerPointExport:
         ev_revenue_median = sorted(ev_revenue_values)[len(ev_revenue_values)//2] if ev_revenue_values else 0
         pe_median = sorted(pe_values)[len(pe_values)//2] if pe_values else 0
         
-        table.cell(median_row, 1).text = f"{ev_ebitda_median:.1f}x"
-        table.cell(median_row, 2).text = f"{ev_revenue_median:.1f}x"
-        table.cell(median_row, 3).text = f"{pe_median:.1f}x"
+        table.cell(median_row, 1).text = f"{fmt_num(ev_ebitda_median, suffix='x')}"
+        table.cell(median_row, 2).text = f"{fmt_num(ev_revenue_median, suffix='x')}"
+        table.cell(median_row, 3).text = f"{fmt_num(pe_median, suffix='x')}"
         
         # Style median row
         for i in range(4):
@@ -349,24 +374,30 @@ class PowerPointExport:
         # Add LBO metrics
         lbo_data = self.model_data.get("lbo_valuation", {})
         
-        content = slide.placeholders[1].text_frame
+        # Try to get content placeholder; fallback to new textbox
+        try:
+            content_tf = slide.placeholders[1].text_frame
+        except IndexError:
+            content_tf = slide.shapes.add_textbox(Inches(0.5), Inches(1.5), Inches(8.5), Inches(6)).text_frame
+        content = content_tf
+        
         p = content.paragraphs[0]
         p.text = "LBO Analysis Results"
         p.font.bold = True
         p.font.size = Pt(18)
         
         metrics = [
-            ("Holding Period", f"{lbo_data.get('holding_period_years', 5)} years"),
-            ("Exit Multiple", f"{lbo_data.get('exit_multiple', 8.0):.1f}x"),
-            ("Entry Enterprise Value", f"${lbo_data.get('entry_enterprise_value', 0)/1_000_000_000:.1f}B"),
-            ("Entry Equity Value", f"${lbo_data.get('entry_equity_value', 0)/1_000_000_000:.1f}B"),
-            ("Initial Debt", f"${lbo_data.get('entry_debt', 0)/1_000_000_000:.1f}B"),
-            ("Exit Enterprise Value", f"${lbo_data.get('exit_enterprise_value', 0)/1_000_000_000:.1f}B"),
-            ("Exit Equity Value", f"${lbo_data.get('exit_equity_value', 0)/1_000_000_000:.1f}B"),
-            ("Equity IRR", f"{lbo_data.get('equity_irr', 0)*100:.1f}%"),
-            ("Cash-on-Cash Multiple", f"{lbo_data.get('cash_on_cash', 0):.1f}x"),
-            ("Entry Debt/EBITDA", f"{lbo_data.get('entry_debt_to_ebitda', 0):.1f}x"),
-            ("Exit Debt/EBITDA", f"{lbo_data.get('exit_debt_to_ebitda', 0):.1f}x")
+            ("Holding Period", f"{fmt_num(lbo_data.get('holding_period_years'), precision=0)} years"),
+            ("Exit Multiple", f"{fmt_num(lbo_data.get('exit_multiple'), suffix='x')}"),
+            ("Entry Enterprise Value", f"${fmt_num(lbo_data.get('entry_enterprise_value'), 1_000_000_000, suffix='B')}"),
+            ("Entry Equity Value", f"${fmt_num(lbo_data.get('entry_equity_value', lbo_data.get('equity_investment')), 1_000_000_000, suffix='B')}"),
+            ("Initial Debt", f"${fmt_num(lbo_data.get('entry_debt', lbo_data.get('debt_investment')), 1_000_000_000, suffix='B')}"),
+            ("Exit Enterprise Value", f"${fmt_num(lbo_data.get('exit_enterprise_value'), 1_000_000_000, suffix='B')}"),
+            ("Exit Equity Value", f"${fmt_num(lbo_data.get('exit_equity_value'), 1_000_000_000, suffix='B')}"),
+            ("Equity IRR", f"{fmt_num(lbo_data.get('equity_irr'), pct=True)}%"),
+            ("Cash-on-Cash Multiple", f"{fmt_num(lbo_data.get('cash_on_cash', lbo_data.get('cash_on_cash_multiple')), suffix='x')}"),
+            ("Entry Debt/EBITDA", f"{fmt_num(lbo_data.get('entry_debt_to_ebitda'), suffix='x')}"),
+            ("Exit Debt/EBITDA", f"{fmt_num(lbo_data.get('exit_debt_to_ebitda'), suffix='x')}"),
         ]
         
         for metric, value in metrics:
@@ -389,13 +420,15 @@ class PowerPointExport:
         chart_data.add_series('Equity Value ($B)', [entry_equity, exit_equity])
         
         x, y, cx, cy = Inches(5), Inches(2), Inches(4), Inches(3)
-        chart = slide.shapes.add_chart(
-            XL_CHART_TYPE.COLUMN_CLUSTERED, x, y, cx, cy, chart_data
-        ).chart
-        
-        chart.has_legend = False
-        chart.has_title = True
-        chart.chart_title.text_frame.text = "LBO Equity Value Growth"
+        try:
+            chart = slide.shapes.add_chart(
+                XL_CHART_TYPE.COLUMN_CLUSTERED, x, y, cx, cy, chart_data
+            ).chart
+            chart.has_legend = False
+            chart.has_title = True
+            chart.chart_title.text_frame.text = "LBO Equity Value Growth"
+        except Exception as chart_err:
+            print(f"[PowerPointExport] Skipping LBO chart due to error: {chart_err}")
     
     def _create_income_statement_slide(self):
         """Create the income statement slide"""
@@ -407,7 +440,15 @@ class PowerPointExport:
         
         # Add income statement table
         income_data = self.model_data.get("income_statement", {})
-        years = list(range(6))  # Historical + 5 year forecast
+        # Derive available years from the income_data dictionary keys
+        def _collect_years(data_dict):
+            years_set = set()
+            for inner in data_dict.values():
+                if isinstance(inner, dict):
+                    years_set.update(inner.keys())
+            return sorted(years_set, key=lambda y: int(y))
+
+        years = _collect_years(income_data) or ["0","1","2","3","4","5"]
         
         # Create table
         left = Inches(0.5)
@@ -427,7 +468,7 @@ class PowerPointExport:
             if i == 0:
                 table.cell(0, col).text = "Historical"
             else:
-                table.cell(0, col).text = f"Year {i}"
+                table.cell(0, col).text = f"Year {year}"
             
             cell = table.cell(0, col)
             cell.fill.solid()
@@ -461,11 +502,11 @@ class PowerPointExport:
                     value = income_data[key].get(str(year), 0)
                     
                     if is_percentage:
-                        table.cell(row, col).text = f"{value*100:.1f}%"
+                        table.cell(row, col).text = f"{fmt_num(value, pct=True)}%"
                     else:
                         # Format in millions
                         value_in_millions = value / 1_000_000
-                        table.cell(row, col).text = f"${value_in_millions:.1f}"
+                        table.cell(row, col).text = f"${fmt_num(value_in_millions)}"
     
     def _create_balance_sheet_slide(self):
         """Create the balance sheet slide"""
@@ -485,28 +526,6 @@ class PowerPointExport:
         width = Inches(9)
         height = Inches(4)
         
-        table_rows = 9  # Selected key metrics
-        table_cols = len(years) + 1  # Years + row labels
-        
-        table = slide.shapes.add_table(table_rows, table_cols, left, top, width, height).table
-        
-        # Set headers
-        table.cell(0, 0).text = "In millions, USD"
-        for i, year in enumerate(years):
-            col = i + 1
-            if i == 0:
-                table.cell(0, col).text = "Historical"
-            else:
-                table.cell(0, col).text = f"Year {i}"
-            
-            cell = table.cell(0, col)
-            cell.fill.solid()
-            cell.fill.fore_color.rgb = RGBColor(0, 112, 192)
-            paragraph = cell.text_frame.paragraphs[0]
-            paragraph.font.bold = True
-            paragraph.font.color.rgb = RGBColor(255, 255, 255)
-        
-        # Add key balance sheet items
         items = [
             ("Cash", "cash"),
             ("Accounts Receivable", "accounts_receivable"),
@@ -519,9 +538,14 @@ class PowerPointExport:
             ("Total Equity", "total_equity")
         ]
         
+        table_rows = len(items) + 1  # header + metrics
+        
+        table = slide.shapes.add_table(table_rows, 1, left, top, width, height).table
+        
+        # Set headers
+        table.cell(0, 0).text = "In millions, USD"
         for i, (label, key) in enumerate(items):
-            row = i + 1
-            table.cell(row, 0).text = label
+            table.cell(i+1, 0).text = label
             
             # Add values for each year
             if isinstance(balance_data, dict) and key in balance_data:
@@ -531,7 +555,7 @@ class PowerPointExport:
                     
                     # Format in millions
                     value_in_millions = value / 1_000_000
-                    table.cell(row, col).text = f"${value_in_millions:.1f}"
+                    table.cell(i+1, col).text = f"${fmt_num(value_in_millions)}"
     
     def _create_cash_flow_slide(self):
         """Create the cash flow statement slide"""
@@ -551,28 +575,6 @@ class PowerPointExport:
         width = Inches(9)
         height = Inches(4)
         
-        table_rows = 7  # Selected key metrics
-        table_cols = len(years) + 1  # Years + row labels
-        
-        table = slide.shapes.add_table(table_rows, table_cols, left, top, width, height).table
-        
-        # Set headers
-        table.cell(0, 0).text = "In millions, USD"
-        for i, year in enumerate(years):
-            col = i + 1
-            if i == 0:
-                table.cell(0, col).text = "Historical"
-            else:
-                table.cell(0, col).text = f"Year {i}"
-            
-            cell = table.cell(0, col)
-            cell.fill.solid()
-            cell.fill.fore_color.rgb = RGBColor(0, 112, 192)
-            paragraph = cell.text_frame.paragraphs[0]
-            paragraph.font.bold = True
-            paragraph.font.color.rgb = RGBColor(255, 255, 255)
-        
-        # Add key cash flow items
         items = [
             ("Net Income", "net_income"),
             ("Depreciation & Amortization", "depreciation"),
@@ -583,9 +585,14 @@ class PowerPointExport:
             ("Free Cash Flow", "free_cash_flow")
         ]
         
+        table_rows = len(items) + 1  # header + metrics
+        
+        table = slide.shapes.add_table(table_rows, 1, left, top, width, height).table
+        
+        # Set headers
+        table.cell(0, 0).text = "In millions, USD"
         for i, (label, key) in enumerate(items):
-            row = i + 1
-            table.cell(row, 0).text = label
+            table.cell(i+1, 0).text = label
             
             # Add values for each year
             if isinstance(cash_flow_data, dict) and key in cash_flow_data:
@@ -595,7 +602,7 @@ class PowerPointExport:
                     
                     # Format in millions
                     value_in_millions = value / 1_000_000
-                    table.cell(row, col).text = f"${value_in_millions:.1f}"
+                    table.cell(i+1, col).text = f"${fmt_num(value_in_millions)}"
     
     def _create_capital_structure_slide(self):
         """Create the capital structure analysis slide"""
@@ -634,12 +641,12 @@ class PowerPointExport:
         for i, scenario in enumerate(cap_structure_data[:5]):  # Limit to 5 scenarios
             row = i + 1
             
-            table.cell(row, 0).text = f"{scenario.get('debt_to_ebitda', 0):.1f}x"
-            table.cell(row, 1).text = f"{scenario.get('debt_to_capital', 0)*100:.1f}%"
-            table.cell(row, 2).text = f"{scenario.get('wacc', 0)*100:.1f}%"
-            table.cell(row, 3).text = scenario.get('credit_rating', "")
-            table.cell(row, 4).text = f"{scenario.get('equity_irr', 0)*100:.1f}%"
-            table.cell(row, 5).text = f"${scenario.get('share_price', 0):.2f}"
+            table.cell(row, 0).text = f"{fmt_num(scenario.get('debt_to_ebitda'), suffix='x')}"
+            table.cell(row, 1).text = f"{fmt_num(scenario.get('debt_to_capital'), pct=True)}%"
+            table.cell(row, 2).text = f"{fmt_num(scenario.get('wacc'), pct=True)}%"
+            table.cell(row, 3).text = str(scenario.get('credit_rating', ""))
+            table.cell(row, 4).text = f"{fmt_num(scenario.get('equity_irr'), pct=True)}%"
+            table.cell(row, 5).text = f"${fmt_num(scenario.get('share_price'), precision=2)}"
         
         # Add a chart
         self._add_capital_structure_chart(slide)
@@ -657,15 +664,33 @@ class PowerPointExport:
         
         # Create chart
         chart_data = CategoryChartData()
-        chart_data.categories = [f"{d:.1f}x" for d in debt_to_ebitda]
+        chart_data.categories = [f"{fmt_num(d, suffix='x')}" for d in debt_to_ebitda]
         chart_data.add_series('WACC (%)', wacc)
         
         x, y, cx, cy = Inches(2), Inches(5), Inches(6), Inches(3)
-        chart = slide.shapes.add_chart(
-            XL_CHART_TYPE.LINE, x, y, cx, cy, chart_data
-        ).chart
-        
-        chart.has_legend = True
-        chart.has_title = True
-        chart.chart_title.text_frame.text = "WACC vs. Leverage"
-        chart.value_axis.has_major_gridlines = True 
+        try:
+            chart = slide.shapes.add_chart(
+                XL_CHART_TYPE.LINE, x, y, cx, cy, chart_data
+            ).chart
+            chart.has_legend = True
+            chart.has_title = True
+            chart.chart_title.text_frame.text = "WACC vs. Leverage"
+            chart.value_axis.has_major_gridlines = True
+        except Exception as chart_err:
+            print(f"[PowerPointExport] Skipping capital-structure chart due to error: {chart_err}")
+
+def _safe_float(val, default=0.0):
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+def fmt_num(value, scale=1, precision=1, suffix='', pct=False):
+    """Safely format a number with scaling and suffix. Returns 'N/A' if not convertible."""
+    try:
+        num = float(value) / scale
+        if pct:
+            num *= 100
+        return f"{num:.{precision}f}{suffix}"
+    except (TypeError, ValueError):
+        return "N/A" 

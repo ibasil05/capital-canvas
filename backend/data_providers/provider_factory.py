@@ -5,10 +5,10 @@ Selects the appropriate provider based on available API keys.
 
 from typing import Optional
 
-from backend.config import config
-from backend.data_providers.base import DataProviderInterface
-from backend.data_providers.fmp_provider import FMPProvider
-from backend.data_providers.sec_provider import SECProvider
+from config import config
+from data_providers.base import DataProviderInterface
+from data_providers.fmp_provider import FMPProvider
+from data_providers.sec_provider import SECProvider
 
 def get_data_provider() -> DataProviderInterface:
     """

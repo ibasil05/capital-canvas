@@ -8,7 +8,7 @@ import httpx
 from fastapi import Request, HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-from backend.config import config
+from config import config
 
 # Security scheme for JWT tokens
 security = HTTPBearer()

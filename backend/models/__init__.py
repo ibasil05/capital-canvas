@@ -3,14 +3,14 @@ Financial models package for CapitalCanvas.
 Contains data models, validators and business logic.
 """
 
-from backend.models.request_models import (
+from models.request_models import (
     CompanyInfoRequest,
     ModelAssumptionsRequest,
     CreateModelRequest,
     UpdateModelRequest
 )
 
-from backend.models.response_models import (
+from models.response_models import (
     CompanyInfoResponse,
     ModelSummaryResponse,
     ModelDetailResponse,
@@ -18,7 +18,7 @@ from backend.models.response_models import (
     ExportResponse
 )
 
-from backend.models.financial_model import ThreeStatementModel
+from models.financial_model import ThreeStatementModel
 
 __all__ = [
     'CompanyInfoRequest',

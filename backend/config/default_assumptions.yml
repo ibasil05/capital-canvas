@@ -1,5 +1,26 @@
+# Core valuation assumptions
 tax_rate: 0.25
 terminal_growth: 0.025
 risk_free_rate: 0.045
 market_premium: 0.055
-beta_override: null 
+beta_override: null
+
+# Balance sheet assumptions
+base_fixed_assets_revenue_multiple: 0.70
+target_debt_to_assets_ratio: 0.30
+
+# Working capital assumptions
+receivable_days: 45
+inventory_days: 60
+payable_days: 30
+
+# Capital expenditure assumptions
+capex_percent_revenue: 0.05
+
+# Trading multiples
+ev_to_ebitda_multiple: 8.0
+
+# LBO assumptions
+lbo_exit_multiple: 8.0
+lbo_years: 5
+debt_to_ebitda: 3.0

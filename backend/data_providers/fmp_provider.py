@@ -6,8 +6,8 @@ import httpx
 from typing import Dict, Any, List, Optional
 from fastapi import HTTPException, status
 
-from backend.config import config
-from backend.data_providers.base import DataProviderInterface
+from config import config
+from data_providers.base import DataProviderInterface
 
 class FMPProvider(DataProviderInterface):
     """FinancialModelingPrep API provider implementation"""
@@ -266,9 +266,28 @@ class FMPProvider(DataProviderInterface):
         if exchange:
             params["exchange"] = exchange
         data = await self._make_request(endpoint, params)
-        # FMP returns list of dicts, we pass through
-        return data
+        
+        # Transform FMP response to the expected format
+        transformed_results = []
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    transformed_results.append({
+                        "ticker": item.get("symbol"),
+                        "company_name": item.get("name"),
+                        "exchange": item.get("stockExchange"), # Or exchangeShortName, depending on preference
+                        "currency": item.get("currency")
+                        # Add other relevant fields if needed by the frontend/app
+                    })
+                else:
+                    # Log if an item in the list is not a dictionary as expected
+                    print(f"Warning: FMP search_companies received a non-dict item in list: {item}")
+        else:
+            # Log if the FMP API did not return a list as expected
+            print(f"Warning: FMP search_companies did not receive a list. Data: {data}")
 
+        return transformed_results
+    
     async def get_technical_indicator(
         self,
         ticker: str,

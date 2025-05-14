@@ -100,12 +100,12 @@ class LBOAnalysisResult(BaseModel):
     entry_equity_value: float = Field(..., description="Entry equity value")
     exit_enterprise_value: float = Field(..., description="Exit enterprise value")
     exit_equity_value: float = Field(..., description="Exit equity value")
-    equity_investment: float = Field(..., description="Equity investment")
-    debt_investment: float = Field(..., description="Debt investment")
-    equity_irr: float = Field(..., description="Equity IRR")
-    cash_on_cash_multiple: float = Field(..., description="Cash on cash multiple")
-    entry_debt_to_ebitda: float = Field(..., description="Entry Debt/EBITDA ratio")
-    exit_debt_to_ebitda: float = Field(..., description="Exit Debt/EBITDA ratio")
+    equity_investment: Optional[float] = Field(None, description="Equity investment")
+    debt_investment: Optional[float] = Field(None, description="Debt investment")
+    equity_irr: Optional[float] = Field(None, description="Equity IRR")
+    cash_on_cash_multiple: Optional[float] = Field(None, description="Cash on cash multiple")
+    entry_debt_to_ebitda: Optional[float] = Field(None, description="Entry Debt/EBITDA ratio")
+    exit_debt_to_ebitda: Optional[float] = Field(None, description="Exit Debt/EBITDA ratio")
 
 # Valuation result response
 class ValuationResponse(BaseModel):
@@ -199,6 +199,7 @@ class RecentAnalysisItem(BaseModel):
     viewed_at: datetime
     # Could add a name or brief description if available
     company_name: Optional[str] = None
+    model_config = {"protected_namespaces": ()}
 
 class RecentAnalysesResponse(BaseModel):
     recent_analyses: List[RecentAnalysisItem] 
